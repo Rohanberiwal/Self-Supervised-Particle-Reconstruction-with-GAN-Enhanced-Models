@@ -1,4 +1,4 @@
-# Self-Supervised Learning for End-to-End Particle Reconstruction for the CMS Experiment
+# Self-Supervised Learning for End-to-End Particle Reconstruction Using Resnet15 and GAN model 
 
 ## Project Overview
 
