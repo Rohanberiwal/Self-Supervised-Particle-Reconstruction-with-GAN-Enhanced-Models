@@ -13,7 +13,7 @@ import torchvision.models as models
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-
+from PIL import Image
 class Generator(nn.Module):
     def __init__(self, input_dim=100, output_dim=1, img_size=28):
         super(Generator, self).__init__()
@@ -198,7 +198,6 @@ unlabeled_images_tensor = torch.tensor(unlabeled_data['images'], dtype=torch.flo
 labeled_images_tensor = torch.tensor(labeled_data['images'], dtype=torch.float32)
 labeled_labels_tensor = torch.tensor(labeled_data['labels'].squeeze(), dtype=torch.long)  # Use .squeeze() if labels are 2D
 
-# Custom Dataset
 class CustomDataset(Dataset):
     def __init__(self, images, labels=None, transform=None):
         self.images = images
@@ -209,90 +208,106 @@ class CustomDataset(Dataset):
         return len(self.images)
 
     def __getitem__(self, idx):
-        image = self.images[idx]
-        # Convert tensor to PIL Image if needed
+        image = self.images[idx].numpy()  # Convert tensor to numpy array
+        image = image.transpose(1, 2, 0)  # Change from (C, H, W) to (H, W, C)
+
+        # Ensure the array is of type uint8
+        image = (image * 255).astype(np.uint8)
+
+        # Handle single channel images by converting them to 3 channels
+        if image.shape[2] == 1:
+            image = np.concatenate([image] * 3, axis=2)
+
+        image = Image.fromarray(image)  # Convert to PIL image
+
         if self.transform:
-            image = transforms.ToPILImage()(image)  # Convert tensor to PIL Image for transformation
             image = self.transform(image)
+
         if self.labels is not None:
             label = self.labels[idx]
             return image, label
         return image
 
-# Define data augmentations
 transform = transforms.Compose([
-    transforms.Resize((224, 224)),         # Resize to match ResNet input size
-    transforms.RandomHorizontalFlip(),     # Data augmentation
-    transforms.RandomRotation(10),         # Data augmentation
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 ])
-
-# Create Data Loaders
 unlabeled_dataset = CustomDataset(images=unlabeled_images_tensor, transform=transform)
 unlabeled_loader = DataLoader(unlabeled_dataset, batch_size=64, shuffle=True)
 
 labeled_dataset = CustomDataset(images=labeled_images_tensor, labels=labeled_labels_tensor, transform=transform)
 labeled_loader = DataLoader(labeled_dataset, batch_size=64, shuffle=True)
 
-# Define ResNet model
+print(unlabeled_dataset)
+
+print(labeled_dataset)
+print("end  of the sweet code ")
+
+import torch
+import torch.nn as nn
+import torchvision.models as models
+import torch.nn.functional as F
+
 class ResNet15(nn.Module):
     def __init__(self):
         super(ResNet15, self).__init__()
-        self.resnet = models.resnet18(pretrained=False)  # Using ResNet-18 as a proxy
-        self.resnet.conv1 = nn.Conv2d(3, 64, kernel_size=(7, 7), stride=(2, 2), padding=(3, 3), bias=False)  # For RGB images
-        self.resnet.fc = nn.Identity()  # Remove final classification layer
+        self.resnet = models.resnet18(pretrained=False)  # Use ResNet-18 as base model
+        self.resnet.fc = nn.Identity()  # Remove the final fully connected layer
 
     def forward(self, x):
         return self.resnet(x)
 
-# Define NT-Xent Loss
-class NTXentLoss(nn.Module):
-    def __init__(self, temperature=0.5):
-        super(NTXentLoss, self).__init__()
-        self.temperature = temperature
+class BarlowTwins(nn.Module):
+    def __init__(self, base_encoder, projection_dim):
+        super(BarlowTwins, self).__init__()
+        self.encoder = base_encoder
+        self.projection_head = nn.Sequential(
+            nn.Linear(512, 256),
+            nn.ReLU(),
+            nn.Linear(256, projection_dim)
+        )
 
-    def forward(self, z_i, z_j):
-        batch_size = z_i.size(0)
-        z_i = F.normalize(z_i, dim=1)
-        z_j = F.normalize(z_j, dim=1)
+    def forward(self, x1, x2):
+        h1 = self.encoder(x1)
+        h2 = self.encoder(x2)
+        z1 = self.projection_head(h1)
+        z2 = self.projection_head(h2)
+        return z1, z2
 
-        # Compute similarity matrix
-        sim = torch.mm(z_i, z_j.t()) / self.temperature
+    def loss(self, z1, z2):
+        z1 = F.normalize(z1, dim=-1)
+        z2 = F.normalize(z2, dim=-1)
+        c = torch.matmul(z1.T, z2) / z1.size(0)
+        on_diag = torch.diagonal(c).add_(-1).pow(2).sum()
+        off_diag = (c**2).sum() - torch.diagonal(c).pow(2).sum()
+        return on_diag + off_diag
 
-        # Create labels
-        labels = torch.arange(batch_size).long().to(z_i.device)
+import torch.optim as optim
 
-        # Compute loss
-        loss = F.cross_entropy(sim, labels)
-        return loss
+base_encoder = ResNet15()
+model = BarlowTwins(base_encoder, projection_dim=128)
+criterion = nn.MSELoss()  # Barlow Twins loss function
+optimizer = optim.Adam(model.parameters(), lr=1e-3)
 
-# Initialize model, loss function, and optimizer
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
-model = ResNet15().to(device)
-criterion = NTXentLoss()
-optimizer = optim.Adam(model.parameters(), lr=0.001)
-
-# Training loop
-num_epochs = 10
-
+num_epochs = 100
 for epoch in range(num_epochs):
     model.train()
-    for images in unlabeled_loader:
-        images = images.to(device)
+    total_loss = 0.0
 
-        # Generate two augmented views
-        view1 = images
-        view2 = images  # Apply augmentations if necessary
-
-        # Forward pass
-        z_i = model(view1)
-        z_j = model(view2)
+    for images in  unlabeled_loader:
+        images_1 = images
+        images_2 = images 
+        z1, z2 = model(images_1, images_2)
 
         # Compute loss
-        loss = criterion(z_i, z_j)
+        loss = model.loss(z1, z2)
 
         # Backward pass and optimization
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
 
-    print(f"Epoch [{epoch+1}/{num_epochs}], Loss: {loss.item()}")
+        total_loss += loss.item()
+
+    print(f"Epoch {epoch+1}, Loss: {total_loss / len( unlabeled_loader)}")
+
