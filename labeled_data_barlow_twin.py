@@ -1,15 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import torchvision.transforms as transforms
-from torch.utils.data import Dataset, DataLoader, random_split
-from PIL import Image
-import numpy as np
-import copy
-
-import torch
-import torch.nn as nn
-import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
 import torchvision.transforms as transforms
 import matplotlib.pyplot as plt
@@ -188,7 +179,12 @@ gen_imgs_labeled = gen_imgs_labeled.detach().numpy()
 labels_labeled = np.random.randint(0, num_classes, size=(num_generate_samples,)).astype(np.int64)
 
 
+z_unlabeled = torch.randn(num_generate_samples, 100)
+gen_imgs_unlabeled = generator(z_unlabeled)
+gen_imgs_unlabeled = gen_imgs_unlabeled.detach().numpy()
+
 labeled_data = {'images': gen_imgs_labeled, 'labels': labels_labeled}
+unlabeled_data = {'images': gen_imgs_unlabeled}
 
 plt.figure(figsize=(10, 5))
 plt.plot(g_losses, label="Generator Loss")
@@ -198,160 +194,161 @@ plt.ylabel("Loss")
 plt.legend()
 plt.show()
 print(labeled_data)
+print(unlabeled_data)
 print("End")
 
 import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import DataLoader, Dataset, random_split
-import torchvision.transforms as transforms
-from PIL import Image
+from sklearn.model_selection import train_test_split
+from torch.utils.data import DataLoader, TensorDataset
 import numpy as np
-import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import DataLoader, Dataset
-import torchvision.transforms as transforms
-from torchvision import models
-import torch.nn.functional as F
 from PIL import Image
 
-# Define the ResNet15 model
-class ResNet15(nn.Module):
-    def __init__(self):
-        super(ResNet15, self).__init__()
-        self.resnet = models.resnet18(pretrained=False)  # Use ResNet-18 as base model
-        self.resnet.fc = nn.Identity()  # Remove the final fully connected layer
+# Function to convert grayscale to RGB
+def grayscale_to_rgb(grayscale_image):
+    return np.stack([grayscale_image] * 3, axis=-1)
 
-    def forward(self, x):
-        return self.resnet(x)
+# Sample labeled data
+labeled_data = {'images': gen_imgs_labeled, 'labels': labels_labeled}
+images = labeled_data['images']
+labels = labeled_data['labels']
 
-# Define the Barlow Twins model with fine-tuning capabilities
-class BarlowTwins(nn.Module):
-    def __init__(self, base_encoder, projection_dim, num_classes=2):
-        super(BarlowTwins, self).__init__()
-        self.encoder = base_encoder
-        self.projection_head = nn.Sequential(
-            nn.Linear(512, 256),
-            nn.ReLU(),
-            nn.Linear(256, projection_dim)
-        )
-        # Classification head for fine-tuning
-        self.classifier = nn.Linear(512, num_classes)
+if images.shape[1] == 1:  # Assuming the channel dimension is at index 1
+    images = np.array([grayscale_to_rgb(img.squeeze()) for img in images])
 
-    def forward(self, x1, x2=None, fine_tune=False):
-        if fine_tune:  # Fine-tuning with labeled data
-            features = self.encoder(x1)
-            return self.classifier(features)
-        else:  # Unsupervised pre-training
-            h1 = self.encoder(x1)
-            h2 = self.encoder(x2)
-            z1 = self.projection_head(h1)
-            z2 = self.projection_head(h2)
-            return z1, z2
+# Split the data into training and validation sets
+images_np = images
+labels_np = labels
 
-    def loss(self, z1, z2):
-        z1 = F.normalize(z1, dim=-1)
-        z2 = F.normalize(z2, dim=-1)
-        c = torch.matmul(z1.T, z2) / z1.size(0)
-        on_diag = torch.diagonal(c).add_(-1).pow(2).sum()
-        off_diag = (c**2).sum() - torch.diagonal(c).pow(2).sum()
-        return on_diag + off_diag
+images_train, images_val, labels_train, labels_val = train_test_split(
+    images_np, labels_np, test_size=0.20, random_state=42
+)
 
-# Define data augmentations
-def get_augmentations():
-    return [
-        transforms.Compose([
-            transforms.RandomResizedCrop(224),
-            transforms.RandomHorizontalFlip(),
-            transforms.RandomRotation(10),
-            transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.2)
-        ]),
-        transforms.Compose([
-            transforms.RandomResizedCrop(224),
-            transforms.RandomVerticalFlip(),
-            transforms.RandomRotation(30),
-            transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.3)
-        ])
-    ]
+# Convert numpy arrays to tensors
+images_train = torch.tensor(images_train, dtype=torch.float32)
+labels_train = torch.tensor(labels_train, dtype=torch.long)
+images_val = torch.tensor(images_val, dtype=torch.float32)
+labels_val = torch.tensor(labels_val, dtype=torch.long)
 
-# Define the Custom Dataset for Labeled Data with Augmentation
-class CustomAugmentedDataset(Dataset):
-    def __init__(self, images, labels, transform=None, augmentations=None):
-        self.images = images
-        self.labels = labels
-        self.transform = transform
-        self.augmentations = augmentations
+# Ensure images are in the shape [batch_size, 3, height, width]
+images_train = images_train.permute(0, 3, 1, 2)
+images_val = images_val.permute(0, 3, 1, 2)
 
-    def __len__(self):
-        return len(self.images)
+train_dataset = TensorDataset(images_train, labels_train)
+val_dataset = TensorDataset(images_val, labels_val)
 
-    def __getitem__(self, idx):
-        image = self.images[idx]
-        image = image.transpose(1, 2, 0)
-        image = (image * 255).astype(np.uint8)
+train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
+val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False)
 
-        if image.shape[2] == 1:
-            image = np.concatenate([image] * 3, axis=2)
-
-        image = Image.fromarray(image)
-
-        # Apply augmentations
-        if self.augmentations:
-            aug = self.augmentations[idx % len(self.augmentations)]
-            image = aug(image)
-
-        if self.transform:
-            image = self.transform(image)
-
-        label = self.labels[idx]
-        return image, label
-
-# DataLoader with Augmentations
-def create_dataloader(images_tensor, labels_tensor, batch_size=64):
-    augmentations = get_augmentations()
-    transform = transforms.Compose([
-        transforms.RandomResizedCrop(224),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-    ])
-    dataset = CustomAugmentedDataset(images=images_tensor, labels=labels_tensor, transform=transform, augmentations=augmentations)
-    return DataLoader(dataset, batch_size=batch_size, shuffle=True)
-
-# Fine-tuning process
-def fine_tune_barlow_twins(model, dataloader, criterion, optimizer, num_epochs=10):
-    model.train()
-    for epoch in range(num_epochs):
-        running_loss = 0.0
-        for inputs, labels in dataloader:
-            inputs, labels = inputs.to(device), labels.to(device)
-            optimizer.zero_grad()
-
-            outputs = model(inputs, fine_tune=True)
-            loss = criterion(outputs, labels)
-
-            loss.backward()
-            optimizer.step()
-
-            running_loss += loss.item() * inputs.size(0)
-
-        epoch_loss = running_loss / len(dataloader.dataset)
-        print(f'Epoch {epoch+1}/{num_epochs}, Loss: {epoch_loss:.4f}')
-
-# Assuming you have labeled_data with 'images' and 'labels' tensors
-images_tensor = labeled_data['images']
-labels_tensor = labeled_data['labels']
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-train_loader = create_dataloader(images_tensor, labels_tensor)
-
-# Initialize the ResNet15 backbone and Barlow Twins model
-resnet15 = ResNet15()
-barlow_twins = BarlowTwins(base_encoder=resnet15, projection_dim=128, num_classes=2).to(device)
-
-# Define loss function and optimizer
+# Load a pre-trained model and replace the final layer
+num_classes = len(torch.unique(labels_train))  
+model = models.resnet18(pretrained=True)
+num_ftrs = model.fc.in_features
+model.fc = nn.Linear(num_ftrs, num_classes)  
 criterion = nn.CrossEntropyLoss()
-optimizer = optim.Adam(barlow_twins.parameters(), lr=0.001)
+optimizer = optim.Adam(model.parameters(), lr=0.001)
 
-# Fine-tune the model
-fine_tune_barlow_twins(barlow_twins, train_loader, criterion, optimizer, num_epochs=10)
+"""
+# Training loop
+num_epochs = 15
+for epoch in range(num_epochs):
+    model.train()
+    running_loss = 0.0
+    for inputs, labels in train_loader:
+        optimizer.zero_grad()
+        outputs = model(inputs)
+        loss = criterion(outputs, labels)
+        loss.backward()
+        optimizer.step()
+        running_loss += loss.item() * inputs.size(0)
+
+    epoch_loss = running_loss / len(train_loader.dataset)
+    print(f"Epoch {epoch+1}/{num_epochs}, Loss: {epoch_loss:.4f}")
+
+    # Validation
+    model.eval()
+    val_loss = 0.0
+    corrects = 0
+    total = 0
+    with torch.no_grad():
+        for inputs, labels in val_loader:
+            outputs = model(inputs)
+            loss = criterion(outputs, labels)
+            val_loss += loss.item() * inputs.size(0)
+            _, preds = torch.max(outputs, 1)
+            corrects += torch.sum(preds == labels.data)
+            total += labels.size(0)
+
+    val_loss /= len(val_loader.dataset)
+    val_acc = corrects.double() / total
+    print(f"Validation Loss: {val_loss:.4f}, Accuracy: {val_acc:.4f}")
+"""
+train_losses = []
+val_losses = []
+val_accuracies = []
+train_accuracies = []
+
+num_epochs = 100
+for epoch in range(num_epochs):
+    model.train()
+    running_loss = 0.0
+    corrects_train = 0
+    total_train = 0
+    
+    for inputs, labels in train_loader:
+        optimizer.zero_grad()
+        outputs = model(inputs)
+        loss = criterion(outputs, labels)
+        loss.backward()
+        optimizer.step()
+        
+        running_loss += loss.item() * inputs.size(0)
+        
+        # Calculate training accuracy
+        _, preds = torch.max(outputs, 1)
+        corrects_train += torch.sum(preds == labels.data)
+        total_train += labels.size(0)
+
+    epoch_loss = running_loss / len(train_loader.dataset)
+    train_accuracy = corrects_train.double() / total_train
+    train_losses.append(epoch_loss)
+    train_accuracies.append(train_accuracy.item())
+    print(f"Epoch {epoch+1}/{num_epochs}, Training Loss: {epoch_loss:.4f}, Training Accuracy: {train_accuracy:.4f}")
+    model.eval()
+    val_loss = 0.0
+    corrects = 0
+    total = 0
+    with torch.no_grad():
+        for inputs, labels in val_loader:
+            outputs = model(inputs)
+            loss = criterion(outputs, labels)
+            val_loss += loss.item() * inputs.size(0)
+            _, preds = torch.max(outputs, 1)
+            corrects += torch.sum(preds == labels.data)
+            total += labels.size(0)
+
+    val_loss /= len(val_loader.dataset)
+    val_acc = corrects.double() / total
+    val_losses.append(val_loss)
+    val_accuracies.append(val_acc.item())
+    print(f"Validation Loss: {val_loss:.4f}, Validation Accuracy: {val_acc:.4f}")
+
+plt.figure(figsize=(15, 6))
+
+plt.subplot(1, 2, 1)
+plt.plot(range(1, num_epochs + 1), train_losses, label='Training Loss', color='blue')
+plt.plot(range(1, num_epochs + 1), val_losses, label='Validation Loss', color='red')
+plt.xlabel('Epoch')
+plt.ylabel('Loss')
+plt.title('Training and Validation Loss')
+plt.legend()
+
+plt.subplot(1, 2, 2)
+plt.plot(range(1, num_epochs + 1), train_accuracies, label='Training Accuracy', color='blue')
+plt.plot(range(1, num_epochs + 1), val_accuracies, label='Validation Accuracy', color='green')
+plt.xlabel('Epoch')
+plt.ylabel('Accuracy')
+plt.title('Training and Validation Accuracy')
+plt.legend()
+
+plt.tight_layout()
+plt.show()
