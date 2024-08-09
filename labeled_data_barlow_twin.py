@@ -119,7 +119,7 @@ scheduler_D = optim.lr_scheduler.StepLR(optimizer_D, step_size=10, gamma=0.5)
 l1_lambda = 1e-5
 gp_lambda = 10
 
-num_epochs = 10
+num_epochs = 100
 g_losses = []
 d_losses = []
 
